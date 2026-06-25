@@ -1,0 +1,360 @@
+---
+# =============================================================================
+# Role: oracle-prereqs
+# Descrição: Pré-requisitos de SO para Oracle 19c (GI + DB)
+# Referência: Oracle Database Installation Guide 19c for Linux
+#             https://docs.oracle.com/en/database/oracle/oracle-database/19/ladbi/
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Configurar repositório Oracle Linux (se necessário)
+# -----------------------------------------------------------------------------
+- name: Habilitar repositório oracle-linux-ol8 para oracle-preinstall
+  yum_repository:
+    name: ol8_baseos_latest
+    description: Oracle Linux 8 BaseOS
+    baseurl: https://yum.oracle.com/repo/OracleLinux/OL8/baseos/latest/x86_64/
+    gpgcheck: yes
+    enabled: yes
+  when: ansible_distribution == "OracleLinux" and ansible_distribution_major_version == "8"
+  tags: packages
+
+# -----------------------------------------------------------------------------
+# 2. Instalar pacotes de pré-requisito
+# O oracle-database-preinstall-19c cria usuário oracle, grupos, ajusta kernel
+# params e limits automaticamente via RPM scripts
+# -----------------------------------------------------------------------------
+- name: Instalar pacotes de pré-requisito Oracle
+  dnf:
+    name: "{{ oracle_os_packages }}"
+    state: present
+    update_cache: yes
+  tags: packages
+
+- name: Instalar pacotes extras para RAC
+  dnf:
+    name: "{{ rac_extra_packages }}"
+    state: present
+  when: oracle_install_type == "RAC"
+  tags: packages
+
+# -----------------------------------------------------------------------------
+# 3. Criar grupos adicionais (o preinstall cria os básicos, mas não todos)
+# -----------------------------------------------------------------------------
+- name: Criar grupos Oracle
+  group:
+    name: "{{ item.name }}"
+    gid: "{{ item.gid }}"
+    state: present
+  loop:
+    - { name: "{{ oracle_group }}",       gid: "{{ oinstall_gid }}" }
+    - { name: "{{ oracle_dba_group }}",   gid: "{{ dba_gid }}" }
+    - { name: "{{ oracle_oper_group }}",  gid: "{{ oper_gid }}" }
+    - { name: "{{ oracle_backupdba_group }}", gid: "{{ backupdba_gid }}" }
+    - { name: "{{ oracle_dgdba_group }}", gid: "{{ dgdba_gid }}" }
+    - { name: "{{ oracle_kmdba_group }}", gid: "{{ kmdba_gid }}" }
+    - { name: "{{ oracle_asmdba_group }}",  gid: "{{ asmdba_gid }}" }    # 54327
+    - { name: "{{ oracle_asmoper_group }}", gid: "{{ asmoper_gid }}" }   # 54328
+    - { name: "{{ oracle_asmadmin_group }}", gid: "{{ asmadmin_gid }}" } # 54329
+    - { name: "{{ oracle_racdba_group }}", gid: "{{ racdba_gid }}" }     # 54330
+  tags: users
+
+# -----------------------------------------------------------------------------
+# 4. Criar usuário grid (separado do oracle para instalação de GI)
+# O usuário oracle é criado pelo preinstall RPM; aqui complementamos
+# -----------------------------------------------------------------------------
+- name: Criar usuário grid
+  user:
+    name: "{{ grid_user }}"
+    uid: "{{ grid_uid }}"
+    group: "{{ oracle_group }}"
+    groups: "{{ oracle_asmadmin_group }},{{ oracle_asmdba_group }},{{ oracle_asmoper_group }},{{ oracle_dba_group }}"
+    append: yes
+    shell: /bin/bash
+    home: /home/{{ grid_user }}
+    comment: "Oracle Grid Infrastructure"
+    state: present
+  tags: users
+
+- name: Garantir grupos corretos para usuário oracle
+  user:
+    name: "{{ oracle_user }}"
+    uid: "{{ oracle_uid }}"
+    group: "{{ oracle_group }}"
+    groups: "{{ oracle_dba_group }},{{ oracle_oper_group }},{{ oracle_asmdba_group }},{{ oracle_racdba_group }},{{ oracle_backupdba_group }},{{ oracle_dgdba_group }},{{ oracle_kmdba_group }}"
+    append: yes
+    shell: /bin/bash
+  tags: users
+
+# -----------------------------------------------------------------------------
+# 5. Criar estrutura de diretórios OFA (Optimal Flexible Architecture)
+# -----------------------------------------------------------------------------
+- name: Criar diretórios Oracle base
+  file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: "{{ item.owner }}"
+    group: "{{ oracle_group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - { path: "/u01",                     owner: root,               mode: "0755" }
+    - { path: "/u01/app",                 owner: "{{ oracle_user }}", mode: "0775" }
+    - { path: "{{ oracle_inventory }}",   owner: "{{ grid_user }}",  mode: "0775" }
+    - { path: "{{ grid_base }}",          owner: "{{ grid_user }}",  mode: "0775" }
+    - { path: "{{ grid_home }}",          owner: "{{ grid_user }}",  mode: "0775" }
+    - { path: "{{ oracle_base }}",        owner: "{{ oracle_user }}", mode: "0775" }
+    - { path: "{{ oracle_home }}",        owner: "{{ oracle_user }}", mode: "0775" }
+    - { path: "{{ oracle_stage_dir }}",   owner: "{{ oracle_user }}", mode: "0775" }
+    - { path: "{{ install_log_dir }}",    owner: root,               mode: "0777" }
+    - { path: "{{ done_dir }}",           owner: root,               mode: "0777" }
+  tags: directories
+
+# -----------------------------------------------------------------------------
+# 6. Configurar parâmetros de kernel
+# O preinstall RPM já faz isso, mas garantimos valores mínimos
+# Ref: https://docs.oracle.com/en/database/oracle/oracle-database/19/ladbi/minimum-parameter-settings-for-installation.html
+# -----------------------------------------------------------------------------
+- name: Configurar parâmetros de kernel Oracle
+  template:
+    src: sysctl-oracle.conf.j2
+    dest: /etc/sysctl.d/97-oracle.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload sysctl
+  tags: kernel
+
+# -----------------------------------------------------------------------------
+# 7. Configurar limites do SO (limits.conf) para oracle e grid
+# Ref: https://docs.oracle.com/en/database/oracle/oracle-database/19/ladbi/setting-resource-limits-for-oracle-software-installation-owners.html
+# -----------------------------------------------------------------------------
+- name: Configurar limits para usuários Oracle
+  template:
+    src: limits-oracle.conf.j2
+    dest: /etc/security/limits.d/97-oracle.conf
+    owner: root
+    group: root
+    mode: "0644"
+  tags: limits
+
+# -----------------------------------------------------------------------------
+# 8. Configurar variáveis de ambiente para oracle e grid
+# -----------------------------------------------------------------------------
+- name: Configurar .bash_profile do usuário grid
+  template:
+    src: bash_profile_grid.j2
+    dest: /home/{{ grid_user }}/.bash_profile
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  tags: environment
+
+- name: Configurar .bash_profile do usuário oracle
+  template:
+    src: bash_profile_oracle.j2
+    dest: /home/{{ oracle_user }}/.bash_profile
+    owner: "{{ oracle_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  tags: environment
+
+# -----------------------------------------------------------------------------
+# 9. Configurar /etc/hosts
+# Em RAC, todos os nós, VIPs e SCAN devem estar no /etc/hosts
+# (ou em DNS — recomendado para produção)
+# -----------------------------------------------------------------------------
+- name: Configurar /etc/hosts
+  template:
+    src: hosts.j2
+    dest: /etc/hosts
+    owner: root
+    group: root
+    mode: "0644"
+    backup: yes
+  tags: network
+
+# -----------------------------------------------------------------------------
+# 10. Configurar nome do host
+# -----------------------------------------------------------------------------
+- name: Definir hostname da máquina
+  hostname:
+    name: "{{ oracle_hostname }}"
+  tags: network
+
+# -----------------------------------------------------------------------------
+# 11. Desabilitar serviços desnecessários
+# -----------------------------------------------------------------------------
+- name: Desabilitar e parar serviços desnecessários
+  systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: no
+  loop: "{{ disabled_services }}"
+  ignore_errors: yes    # Alguns serviços podem não existir em todas as VMs
+  tags: services
+
+# -----------------------------------------------------------------------------
+# 12. Configurar SELinux
+# -----------------------------------------------------------------------------
+- name: Configurar SELinux para permissive
+  selinux:
+    policy: targeted
+    state: "{{ selinux_state }}"
+  tags: selinux
+
+- name: Persistir configuração do SELinux em /etc/selinux/config
+  lineinfile:
+    path: /etc/selinux/config
+    regexp: '^SELINUX='
+    line: "SELINUX={{ selinux_state }}"
+  tags: selinux
+
+# -----------------------------------------------------------------------------
+# 13. Configurar NTP (Chrony) — crítico para RAC (Clock Sync)
+# O Oracle Clusterware requer sincronismo de tempo preciso entre os nós
+# -----------------------------------------------------------------------------
+- name: Instalar e configurar Chrony
+  dnf:
+    name: chrony
+    state: present
+  tags: ntp
+
+- name: Habilitar e iniciar Chrony
+  systemd:
+    name: chronyd
+    state: started
+    enabled: yes
+  tags: ntp
+
+# -----------------------------------------------------------------------------
+# 14. SSH User Equivalency (somente RAC)
+# Necessário para o instalador do Grid executar comandos remotos
+# ATENÇÃO: Em produção, use chaves gerenciadas pelo seu cofre de senhas
+# -----------------------------------------------------------------------------
+- name: Criar diretório .ssh para grid
+  file:
+    path: "/home/{{ grid_user }}/.ssh"
+    state: directory
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0700"
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+- name: Criar diretório .ssh para oracle
+  file:
+    path: "/home/{{ oracle_user }}/.ssh"
+    state: directory
+    owner: "{{ oracle_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0700"
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+- name: Gerar par de chaves SSH para grid
+  openssh_keypair:
+    path: "/home/{{ grid_user }}/.ssh/id_rsa"
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0600"
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+- name: Gerar par de chaves SSH para oracle
+  openssh_keypair:
+    path: "/home/{{ oracle_user }}/.ssh/id_rsa"
+    owner: "{{ oracle_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0600"
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+- name: Coletar chaves públicas SSH de todos os nós (grid)
+  slurp:
+    src: "/home/{{ grid_user }}/.ssh/id_rsa.pub"
+  register: grid_ssh_pubkeys
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+- name: Distribuir authorized_keys do grid para todos os nós
+  authorized_key:
+    user: "{{ grid_user }}"
+    key: "{{ hostvars[item]['grid_ssh_pubkeys']['content'] | b64decode }}"
+    state: present
+  loop: "{{ groups['rac_nodes'] }}"
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+- name: Coletar chaves públicas SSH de todos os nós (oracle)
+  slurp:
+    src: "/home/{{ oracle_user }}/.ssh/id_rsa.pub"
+  register: oracle_ssh_pubkeys
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+- name: Distribuir authorized_keys do oracle para todos os nós
+  authorized_key:
+    user: "{{ oracle_user }}"
+    key: "{{ hostvars[item]['oracle_ssh_pubkeys']['content'] | b64decode }}"
+    state: present
+  loop: "{{ groups['rac_nodes'] }}"
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+- name: Adicionar known_hosts para evitar prompt na primeira conexão (grid)
+  shell: |
+    ssh-keyscan -H {{ hostvars[item]['ansible_host'] }} >> /home/{{ grid_user }}/.ssh/known_hosts
+    ssh-keyscan -H {{ hostvars[item]['oracle_hostname'] }} >> /home/{{ grid_user }}/.ssh/known_hosts
+  loop: "{{ groups['rac_nodes'] }}"
+  become_user: "{{ grid_user }}"
+  when: oracle_install_type == "RAC"
+  tags: ssh
+
+# -----------------------------------------------------------------------------
+# 15. Configurar udev rules para os discos ASM
+# Garante que os discos tenham permissão correta para o usuário grid/oracle
+# Isso substitui o ASMLib no Oracle Linux 7/8 com kernel 4.x+
+# Ref: MOS Note 1937060.1
+# -----------------------------------------------------------------------------
+- name: Coletar informações dos discos ASM
+  command: "udevadm info --query=all --name={{ item }}"
+  register: disk_udev_info
+  loop: "{{ asm_ocr_disks | default([]) + asm_data_disks + asm_fra_disks }}"
+  ignore_errors: yes
+  changed_when: false
+  tags: storage
+
+- name: Criar regras udev para discos ASM
+  template:
+    src: udev-asm-rules.j2
+    dest: /etc/udev/rules.d/99-oracle-asmdevices.rules
+    owner: root
+    group: root
+    mode: "0644"
+  notify: reload udev rules
+  tags: storage
+
+- name: Particionar discos ASM (criar label GPT e uma partição única)
+  shell: |
+    if ! blkid {{ item }} | grep -q 'PTYPE'; then
+      parted -s {{ item }} mklabel gpt
+      parted -s {{ item }} mkpart primary 1MiB 100%
+    fi
+  loop: "{{ asm_ocr_disks | default([]) + asm_data_disks + asm_fra_disks }}"
+  ignore_errors: yes
+  changed_when: false
+  tags: storage
+
+- name: Forçar reload das regras udev
+  command: udevadm trigger --type=devices --action=change
+  changed_when: false
+  tags: storage
+
+# -----------------------------------------------------------------------------
+# 16. Verificar pré-requisitos com o CVU (Cluster Verification Utility)
+# Usa standalone CVU (cluvfy_zip) se disponível; pula se não configurado.
+# Para CVU pós-instalação do GI, ver grid-install/tasks/main.yml (tag: validate)
+# -----------------------------------------------------------------------------
+- name: Executar CVU pré-instalação (standalone)
+  include_tasks: cluvfy.yml
+  tags: validate

@@ -1,0 +1,126 @@
+---
+# =============================================================================
+# CVU pré-instalação — Cluster Verification Utility (standalone)
+#
+# Requer: cluvfy_zip definido em group_vars/all.yml apontando para um ZIP
+# disponível em oracle_installer_source. Se cluvfy_zip estiver vazio, pula.
+#
+# Controle de falha: use_ignore_prechecks (group_vars/all.yml)
+#   "false" → falha o play se CVU reportar erros (padrão, recomendado)
+#   "true"  → exibe warning e continua mesmo com erros
+#
+# Download standalone CVU:
+#   https://www.oracle.com/database/technologies/clusterware-downloads.html
+# =============================================================================
+
+- name: CVU pré-install — verificar se cluvfy_zip está configurado
+  debug:
+    msg: "cluvfy_zip não configurado — pulando validação pré-instalação CVU"
+  when: cluvfy_zip == ""
+
+- name: CVU pré-install — verificar sentinela (já executado)
+  stat:
+    path: "{{ done_dir }}/cluvfy_prereqs_done"
+  register: cluvfy_prereqs_done_sentinel
+  when: cluvfy_zip != ""
+
+- name: CVU pré-install — verificar se ZIP existe na origem
+  stat:
+    path: "{{ oracle_installer_source }}/{{ cluvfy_zip }}"
+  register: cluvfy_zip_stat
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+
+- name: CVU pré-install — abortar se ZIP não encontrado
+  fail:
+    msg: >
+      cluvfy_zip='{{ cluvfy_zip }}' configurado mas não encontrado em
+      '{{ oracle_installer_source }}'. Corrija oracle_installer_source ou
+      defina cluvfy_zip='' para pular a validação.
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+    - not cluvfy_zip_stat.stat.exists
+
+- name: CVU pré-install — criar diretório de staging
+  file:
+    path: "{{ cluvfy_stage_dir }}"
+    state: directory
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0775"
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+    - cluvfy_zip_stat.stat.exists
+
+- name: CVU pré-install — extrair ZIP do standalone CVU
+  unarchive:
+    src: "{{ oracle_installer_source }}/{{ cluvfy_zip }}"
+    dest: "{{ cluvfy_stage_dir }}"
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    remote_src: yes
+  become_user: "{{ grid_user }}"
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+    - cluvfy_zip_stat.stat.exists
+
+- name: CVU pré-install — executar cluvfy stage -pre crsinst
+  shell: >
+    {{ cluvfy_stage_dir }}/runcluvfy.sh stage -pre crsinst
+    {% if oracle_install_type == "RAC" %}-n {{ groups['rac_nodes'] | join(',') }}{% endif %}
+    -verbose
+    2>&1 | tee {{ install_log_dir }}/cluvfy_prereqs.log
+  become_user: "{{ grid_user }}"
+  register: cluvfy_prereqs_result
+  ignore_errors: true
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+    - cluvfy_zip_stat.stat.exists
+
+- name: CVU pré-install — exibir resultado
+  debug:
+    var: cluvfy_prereqs_result.stdout_lines
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+    - cluvfy_prereqs_result is defined
+
+- name: CVU pré-install — falhar se erros e use_ignore_prechecks=false
+  fail:
+    msg: >
+      CVU pré-instalação reportou erros (rc={{ cluvfy_prereqs_result.rc }}).
+      Corrija os pré-requisitos ou defina use_ignore_prechecks='true' para continuar.
+      Log completo: {{ install_log_dir }}/cluvfy_prereqs.log
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+    - cluvfy_prereqs_result is defined
+    - cluvfy_prereqs_result.rc != 0
+    - use_ignore_prechecks | lower == "false"
+
+- name: CVU pré-install — aviso (use_ignore_prechecks=true)
+  debug:
+    msg: >
+      AVISO: CVU pré-instalação reportou erros mas 'use_ignore_prechecks=true'
+      — continuando mesmo assim. Verifique {{ install_log_dir }}/cluvfy_prereqs.log
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+    - cluvfy_prereqs_result is defined
+    - cluvfy_prereqs_result.rc != 0
+    - use_ignore_prechecks | lower == "true"
+
+- name: CVU pré-install — marcar como concluído
+  file:
+    path: "{{ done_dir }}/cluvfy_prereqs_done"
+    state: touch
+  when:
+    - cluvfy_zip != ""
+    - not cluvfy_prereqs_done_sentinel.stat.exists
+    - cluvfy_prereqs_result is defined
+    - cluvfy_prereqs_result.rc == 0 or use_ignore_prechecks | lower == "true"

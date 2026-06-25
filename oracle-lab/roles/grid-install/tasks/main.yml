@@ -1,0 +1,297 @@
+---
+# =============================================================================
+# Role: grid-install
+# Descrição: Instalação silenciosa do Oracle Grid Infrastructure 19c
+#
+# Fluxo:
+#   1. Copiar e extrair binários do GI
+#   2. Gerar response file (RAC=CRS_CONFIG | SI=HA_CONFIG)
+#   3. Executar gridSetup.sh em modo silencioso
+#   4. Executar orainstRoot.sh e root.sh (como root)
+#   5. Executar gridSetup.sh -executeConfigTools (configuração pós-install)
+#
+# Referência:
+#   https://docs.oracle.com/en/database/oracle/oracle-database/19/cwlin/
+#   MOS Note: 1962946.1 — How to Install Oracle Grid Infrastructure 19c Silently
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Verificar se o GI já está instalado (idempotência)
+# -----------------------------------------------------------------------------
+- name: Verificar se Grid Infrastructure já está instalado
+  stat:
+    path: "{{ grid_home }}/bin/crsctl"
+  register: gi_installed
+  tags: always
+
+- name: Informar status do GI
+  debug:
+    msg: "Grid Infrastructure já instalado em {{ grid_home }} — pulando instalação"
+  when: gi_installed.stat.exists
+  tags: always
+
+# -----------------------------------------------------------------------------
+# 2. Copiar binários para a VM (apenas no nó 1 para RAC ou no único nó para SI)
+# O ZIP é grande (~3GB) — use delegate_to ou monte via NFS para economizar tempo
+# -----------------------------------------------------------------------------
+- name: Verificar se o ZIP do GI já existe no stage dir
+  stat:
+    path: "{{ oracle_stage_dir }}/{{ grid_zip }}"
+  register: gi_zip_exists
+  tags: copy
+
+- name: Copiar ZIP do Grid Infrastructure para VM
+  copy:
+    src: "{{ oracle_installer_source }}/{{ grid_zip }}"
+    dest: "{{ oracle_stage_dir }}/{{ grid_zip }}"
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+  when:
+    - not gi_installed.stat.exists
+    - not gi_zip_exists.stat.exists
+  tags: copy
+
+- name: Verificar se GI já foi extraído
+  stat:
+    path: "{{ grid_home }}/gridSetup.sh"
+  register: gi_extracted
+  tags: extract
+
+- name: Extrair ZIP do Grid Infrastructure para GRID_HOME
+  unarchive:
+    src: "{{ oracle_stage_dir }}/{{ grid_zip }}"
+    dest: "{{ grid_home }}"
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    remote_src: yes
+  become_user: "{{ grid_user }}"
+  when:
+    - not gi_installed.stat.exists
+    - not gi_extracted.stat.exists
+  tags: extract
+
+# -----------------------------------------------------------------------------
+# 3. Gerar response file para instalação silenciosa
+# -----------------------------------------------------------------------------
+- name: Gerar response file do Grid Infrastructure (RAC)
+  template:
+    src: grid_install_rac.rsp.j2
+    dest: "{{ oracle_stage_dir }}/grid_install.rsp"
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  when:
+    - not gi_installed.stat.exists
+    - oracle_install_type == "RAC"
+  tags: config
+
+- name: Gerar response file do Grid Infrastructure (SI)
+  template:
+    src: grid_install_si.rsp.j2
+    dest: "{{ oracle_stage_dir }}/grid_install.rsp"
+    owner: "{{ grid_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  when:
+    - not gi_installed.stat.exists
+    - oracle_install_type == "SI"
+  tags: config
+
+# -----------------------------------------------------------------------------
+# 4. Executar gridSetup.sh em modo silencioso
+# NOTA: O instalador retorna código 6 (WARNING) quando executado sem display
+#       mas a instalação é concluída com sucesso. Usamos ignore_errors + validação.
+# -----------------------------------------------------------------------------
+- name: Verificar sentinela — gridSetup.sh
+  stat:
+    path: "{{ done_dir }}/gi_install_done"
+  register: gi_install_done_sentinel
+  tags: always
+
+- name: Executar instalador do Grid Infrastructure (silencioso)
+  shell: >
+    {{ grid_home }}/gridSetup.sh
+    -silent
+    -responseFile {{ oracle_stage_dir }}/grid_install.rsp
+    -ignorePrereqFailure
+    2>&1 | tee {{ install_log_dir }}/grid_install.log
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    CV_ASSUME_DISTID: OEL8.3
+  register: gi_install_result
+  failed_when: >
+    gi_install_result.rc not in [0, 6] or
+    'FATAL' in gi_install_result.stdout
+  when:
+    - not gi_installed.stat.exists
+    - not gi_install_done_sentinel.stat.exists
+  async: 3600    # Timeout de 1h — instalação pode demorar
+  poll: 30
+  tags: install
+
+- name: Marcar gridSetup.sh como concluído
+  file:
+    path: "{{ done_dir }}/gi_install_done"
+    state: touch
+  when:
+    - not gi_installed.stat.exists
+    - not gi_install_done_sentinel.stat.exists
+  tags: install
+
+- name: Exibir últimas linhas do log de instalação do GI
+  shell: "tail -50 {{ install_log_dir }}/grid_install.log"
+  register: gi_log_tail
+  changed_when: false
+  when:
+    - not gi_installed.stat.exists
+    - not gi_install_done_sentinel.stat.exists
+  tags: install
+
+- name: Log de instalação do GI (últimas linhas)
+  debug:
+    var: gi_log_tail.stdout_lines
+  when:
+    - not gi_installed.stat.exists
+    - not gi_install_done_sentinel.stat.exists
+  tags: install
+
+# -----------------------------------------------------------------------------
+# 5. Executar scripts de root (devem rodar como root)
+# No RAC: orainstRoot.sh em todos os nós, root.sh em TODOS os nós (sequencial)
+# -----------------------------------------------------------------------------
+- name: Verificar sentinela — orainstRoot.sh
+  stat:
+    path: "{{ done_dir }}/gi_orainst_root_done"
+  register: gi_orainst_root_done_sentinel
+  tags: always
+
+- name: Executar orainstRoot.sh
+  shell: "{{ oracle_inventory }}/orainstRoot.sh 2>&1 | tee -a {{ install_log_dir }}/grid_root.log"
+  when:
+    - not gi_installed.stat.exists
+    - not gi_orainst_root_done_sentinel.stat.exists
+  tags: root_scripts
+
+- name: Marcar orainstRoot.sh como concluído
+  file:
+    path: "{{ done_dir }}/gi_orainst_root_done"
+    state: touch
+  when:
+    - not gi_installed.stat.exists
+    - not gi_orainst_root_done_sentinel.stat.exists
+  tags: root_scripts
+
+- name: Verificar sentinela — root.sh do GI
+  stat:
+    path: "{{ done_dir }}/gi_root_done"
+  register: gi_root_done_sentinel
+  tags: always
+
+- name: Executar root.sh no nó atual
+  shell: "{{ grid_home }}/root.sh 2>&1 | tee -a {{ install_log_dir }}/grid_root.log"
+  when:
+    - not gi_installed.stat.exists
+    - not gi_root_done_sentinel.stat.exists
+  register: root_sh_result
+  tags: root_scripts
+
+- name: Marcar root.sh do GI como concluído
+  file:
+    path: "{{ done_dir }}/gi_root_done"
+    state: touch
+  when:
+    - not gi_installed.stat.exists
+    - not gi_root_done_sentinel.stat.exists
+  tags: root_scripts
+
+- name: Verificar resultado do root.sh
+  debug:
+    var: root_sh_result.stdout_lines
+  when:
+    - not gi_installed.stat.exists
+    - not gi_root_done_sentinel.stat.exists
+  tags: root_scripts
+
+# -----------------------------------------------------------------------------
+# 6. Executar configTools (pós-instalação) — apenas do nó 1 para RAC
+# Isso executa o ASMCA, configura o OCR e inicia o clusterware
+# -----------------------------------------------------------------------------
+- name: Verificar sentinela — executeConfigTools
+  stat:
+    path: "{{ done_dir }}/gi_configtools_done"
+  register: gi_configtools_done_sentinel
+  tags: always
+
+- name: Executar executeConfigTools (configuração pós-instalação do GI)
+  shell: >
+    {{ grid_home }}/gridSetup.sh
+    -silent
+    -executeConfigTools
+    -responseFile {{ oracle_stage_dir }}/grid_install.rsp
+    -ignorePrereqFailure
+    2>&1 | tee {{ install_log_dir }}/grid_configtools.log
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+  register: gi_configtools_result
+  failed_when: >
+    gi_configtools_result.rc not in [0, 6] or
+    'FATAL' in gi_configtools_result.stdout
+  when:
+    - not gi_installed.stat.exists
+    - not gi_configtools_done_sentinel.stat.exists
+    - inventory_hostname in groups['rac_primary_node'] or oracle_install_type == "SI"
+  async: 3600
+  poll: 30
+  tags: configtools
+
+- name: Marcar executeConfigTools como concluído
+  file:
+    path: "{{ done_dir }}/gi_configtools_done"
+    state: touch
+  when:
+    - not gi_installed.stat.exists
+    - not gi_configtools_done_sentinel.stat.exists
+    - inventory_hostname in groups['rac_primary_node'] or oracle_install_type == "SI"
+  tags: configtools
+
+# -----------------------------------------------------------------------------
+# 7. Verificar status do clusterware (RAC)
+# -----------------------------------------------------------------------------
+- name: Verificar status do Oracle Clusterware
+  shell: "{{ grid_home }}/bin/crsctl check cluster -all"
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+  register: crs_status
+  changed_when: false
+  when: oracle_install_type == "RAC"
+  tags: validate
+
+- name: Status do Clusterware
+  debug:
+    var: crs_status.stdout_lines
+  when: oracle_install_type == "RAC"
+  tags: validate
+
+# -----------------------------------------------------------------------------
+# 8. Verificar instância ASM
+# -----------------------------------------------------------------------------
+- name: Verificar se ASM está ativo
+  shell: |
+    {{ grid_home }}/bin/srvctl status asm
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    ORACLE_SID: >-
+      {% if oracle_install_type == "RAC" %}+ASM{{ hostvars[inventory_hostname]['node_number'] }}{% else %}+ASM{% endif %}
+  register: asm_status
+  changed_when: false
+  tags: validate
+
+- name: Status do ASM
+  debug:
+    var: asm_status.stdout_lines
+  tags: validate

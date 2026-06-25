@@ -1,0 +1,193 @@
+---
+# =============================================================================
+# Variáveis globais — válidas para RAC e Single Instance
+# Ajuste os paths conforme sua estrutura de armazenamento no VirtualBox
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Versão Oracle
+# -----------------------------------------------------------------------------
+oracle_version: "19.3"
+oracle_version_major: "19"
+
+# -----------------------------------------------------------------------------
+# Binários de instalação
+# Coloque os ZIPs do Oracle neste diretório no HOST (será copiado para a VM)
+# ou aponte para um diretório já montado dentro da VM
+# -----------------------------------------------------------------------------
+oracle_stage_dir: /u01/stage          # Destino na VM para staging dos zips
+oracle_installer_source: /mnt/oracle_software  # Origem no host (ou NFS mount)
+
+# Nomes dos arquivos ZIP (Oracle 19c base release)
+grid_zip: "LINUX.X64_193000_grid_home.zip"
+db_zip: "LINUX.X64_193000_db_home.zip"
+
+# Patch mais recente (opcional — comente para ignorar patches)
+# oracle_opatch_zip: "p6880880_190000_Linux-x86-64.zip"
+# oracle_ru_patch: "p35320081_190000_Linux-x86-64.zip"   # RU 19.20
+
+# -----------------------------------------------------------------------------
+# Usuários e grupos do Oracle
+# Atenção: grid e oracle são usuários separados quando há GI instalado
+# -----------------------------------------------------------------------------
+oracle_user: oracle
+grid_user: grid
+oracle_group: oinstall         # Grupo primário de oracle e grid
+
+# Grupos secundários
+oracle_dba_group: dba
+oracle_oper_group: oper
+oracle_backupdba_group: backupdba
+oracle_dgdba_group: dgdba
+oracle_kmdba_group: kmdba
+oracle_racdba_group: racdba
+oracle_asmdba_group: asmdba
+oracle_asmoper_group: asmoper
+oracle_asmadmin_group: asmadmin
+
+# UIDs/GIDs fixos — importante para RAC (devem ser iguais nos dois nós)
+grid_uid: 54321
+oracle_uid: 54322
+oinstall_gid: 54321
+dba_gid: 54322
+oper_gid: 54323
+backupdba_gid: 54324
+dgdba_gid: 54325
+kmdba_gid: 54326
+asmdba_gid: 54327     # Alinhado com ambiente de produção (serverConfig.yml)
+asmoper_gid: 54328
+asmadmin_gid: 54329
+racdba_gid: 54330
+
+# -----------------------------------------------------------------------------
+# Estrutura de diretórios
+# Oracle Optimal Flexible Architecture (OFA) — Doc ID 1966676.1
+# -----------------------------------------------------------------------------
+oracle_base: /u01/app/oracle
+grid_base: /u01/app/grid
+oracle_inventory: /u01/app/oraInventory
+
+# Oracle Homes
+oracle_home: /u01/app/oracle/product/19.0.0/dbhome_1
+grid_home: /u01/app/19.0.0/grid
+
+# Diretório de logs de instalação
+install_log_dir: /tmp/oracle_install_logs
+
+# Diretório de sentinelas de idempotência (arquivos touch para skip de etapas já executadas)
+done_dir: "{{ install_log_dir }}/done"
+
+# -----------------------------------------------------------------------------
+# Senhas (em produção: use Ansible Vault — ansible-vault encrypt_string)
+# -----------------------------------------------------------------------------
+oracle_sys_password: "Oracle_1234#"
+oracle_system_password: "Oracle_1234#"
+oracle_asmsnmp_password: "Oracle_1234#"
+oracle_asm_monitor_password: "Oracle_1234#"
+
+# -----------------------------------------------------------------------------
+# Parâmetros dos Diskgroups ASM
+# AU_SIZE = 4MB é o padrão recomendado pela Oracle para bancos OLTP
+# -----------------------------------------------------------------------------
+
+# Diskgroup OCR/VOTING (somente RAC)
+asm_ocr_diskgroup_name: OCR
+asm_ocr_redundancy: NORMAL        # NORMAL = 3 discos, EXTERNAL = 1 disco
+asm_ocr_au_size: 4
+
+# Diskgroup DATA
+asm_data_diskgroup_name: DATA
+asm_data_redundancy: EXTERNAL     # Para lab, EXTERNAL economiza disco
+asm_data_au_size: 4
+
+# Diskgroup FRA (Fast Recovery Area)
+asm_fra_diskgroup_name: FRA
+asm_fra_redundancy: EXTERNAL
+asm_fra_au_size: 4
+
+# -----------------------------------------------------------------------------
+# Parâmetros do banco de dados
+# -----------------------------------------------------------------------------
+oracle_sid: ORCL
+oracle_db_name: ORCL
+oracle_pdb_name: ORCLPDB1
+oracle_db_unique_name: ORCL        # Será sobrescrito por host_vars para DG
+
+oracle_characterset: AL32UTF8
+oracle_ncharacterset: AL16UTF16
+oracle_db_type: MULTIPURPOSE       # OLTP, DW ou MULTIPURPOSE
+
+# Tamanho do SGA/PGA em MB — ajuste conforme RAM da VM
+oracle_memory_target: 2048         # 2GB — use 0 para AMM automático
+oracle_sga_target: 1536            # 1.5GB
+oracle_pga_target: 512             # 512MB
+
+# Listener
+oracle_listener_name: LISTENER
+oracle_listener_port: 1521
+
+# Fast Recovery Area
+oracle_fra_size: 10240             # 10GB em MB
+
+# -----------------------------------------------------------------------------
+# Configurações do Sistema Operacional
+# Baseado em: Oracle Database Installation Guide 19c for Linux
+# Doc ID: E96432-12
+# -----------------------------------------------------------------------------
+oracle_os_packages:
+  - oracle-database-preinstall-19c   # Metapacote Oracle que ajusta tudo
+  - bc
+  - binutils
+  - compat-libcap1
+  - compat-libstdc++-33
+  - elfutils-libelf
+  - elfutils-libelf-devel
+  - fontconfig-devel
+  - glibc
+  - glibc-devel
+  - ksh
+  - libaio
+  - libaio-devel
+  - libX11
+  - libXau
+  - libXi
+  - libXtst
+  - libgcc
+  - librdmacm-devel
+  - libstdc++
+  - libstdc++-devel
+  - libxcb
+  - make
+  - net-tools
+  - nfs-utils
+  - python3
+  - python3-configshell
+  - python3-rtslib
+  - python3-six
+  - targetcli
+  - smartmontools
+  - sysstat
+  - unixODBC
+  - unzip
+
+# Pacotes adicionais para RAC
+rac_extra_packages:
+  - cvuqdisk
+
+# Serviços a desabilitar em ambiente de lab
+disabled_services:
+  - firewalld
+  - avahi-daemon
+  - bluetooth
+
+# Configuração do SELinux para lab (permissive — em produção revisar)
+selinux_state: permissive
+
+# -----------------------------------------------------------------------------
+# CVU — Cluster Verification Utility (pré-instalação)
+# Baixar standalone CVU em: https://www.oracle.com/database/technologies/clusterware-downloads.html
+# Deixar vazio para pular a validação pré-instalação
+# -----------------------------------------------------------------------------
+cluvfy_zip: ""                                    # Nome do zip standalone (ex: "cluvfy.zip")
+cluvfy_stage_dir: "{{ oracle_stage_dir }}/cluvfy_stage"
+use_ignore_prechecks: "false"                     # "true" = avisa e continua; "false" = para em falha

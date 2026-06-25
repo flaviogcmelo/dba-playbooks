@@ -1,0 +1,208 @@
+---
+# =============================================================================
+# Role: oracle-install
+# Descrição: Instalação silenciosa do software Oracle Database 19c
+#
+# IMPORTANTE: Esta role instala SOMENTE o software (INSTALL_DB_SWONLY).
+# A criação do banco é feita pela role oracle-dbca.
+# Isso permite múltiplos bancos no mesmo ORACLE_HOME.
+#
+# Para RAC: instalar em todos os nós com o mesmo ORACLE_HOME
+# Para SI: instalar em cada nó individualmente
+#
+# Referência:
+#   https://docs.oracle.com/en/database/oracle/oracle-database/19/ladbi/
+#   MOS Note: 885643.1 — Silent Installation of Oracle Database 19c
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# 1. Verificar se Oracle Database já está instalado (idempotência)
+# -----------------------------------------------------------------------------
+- name: Verificar se Oracle Database já está instalado
+  stat:
+    path: "{{ oracle_home }}/bin/oracle"
+  register: oracle_installed
+  tags: always
+
+- name: Informar status do Oracle DB
+  debug:
+    msg: "Oracle Database já instalado em {{ oracle_home }} — pulando instalação"
+  when: oracle_installed.stat.exists
+  tags: always
+
+# -----------------------------------------------------------------------------
+# 2. Copiar e extrair binários
+# -----------------------------------------------------------------------------
+- name: Verificar se ZIP do Oracle DB já existe no stage dir
+  stat:
+    path: "{{ oracle_stage_dir }}/{{ db_zip }}"
+  register: db_zip_exists
+  when: not oracle_installed.stat.exists
+  tags: copy
+
+- name: Copiar ZIP do Oracle Database para VM
+  copy:
+    src: "{{ oracle_installer_source }}/{{ db_zip }}"
+    dest: "{{ oracle_stage_dir }}/{{ db_zip }}"
+    owner: "{{ oracle_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0644"
+  when:
+    - not oracle_installed.stat.exists
+    - not db_zip_exists.stat.exists
+  tags: copy
+
+- name: Verificar se Oracle DB já foi extraído
+  stat:
+    path: "{{ oracle_home }}/runInstaller"
+  register: db_extracted
+  when: not oracle_installed.stat.exists
+  tags: extract
+
+- name: Extrair ZIP do Oracle Database para ORACLE_HOME
+  unarchive:
+    src: "{{ oracle_stage_dir }}/{{ db_zip }}"
+    dest: "{{ oracle_home }}"
+    owner: "{{ oracle_user }}"
+    group: "{{ oracle_group }}"
+    remote_src: yes
+  become_user: "{{ oracle_user }}"
+  when:
+    - not oracle_installed.stat.exists
+    - not db_extracted.stat.exists
+  tags: extract
+
+# -----------------------------------------------------------------------------
+# 3. Gerar response file
+# -----------------------------------------------------------------------------
+- name: Gerar response file do Oracle Database
+  template:
+    src: db_install.rsp.j2
+    dest: "{{ oracle_stage_dir }}/db_install.rsp"
+    owner: "{{ oracle_user }}"
+    group: "{{ oracle_group }}"
+    mode: "0640"
+  when: not oracle_installed.stat.exists
+  tags: config
+
+# -----------------------------------------------------------------------------
+# 4. Executar instalador do Oracle Database (software only)
+# -----------------------------------------------------------------------------
+- name: Verificar sentinela — runInstaller Oracle DB
+  stat:
+    path: "{{ done_dir }}/db_install_done"
+  register: db_install_done_sentinel
+  tags: always
+
+- name: Executar instalador do Oracle Database (silencioso)
+  shell: >
+    {{ oracle_home }}/runInstaller
+    -silent
+    -responseFile {{ oracle_stage_dir }}/db_install.rsp
+    -ignorePrereqFailure
+    -waitforcompletion
+    2>&1 | tee {{ install_log_dir }}/db_install.log
+  become_user: "{{ oracle_user }}"
+  environment:
+    ORACLE_HOME: "{{ oracle_home }}"
+    ORACLE_BASE: "{{ oracle_base }}"
+    CV_ASSUME_DISTID: OEL8.3
+  register: db_install_result
+  failed_when: >
+    db_install_result.rc not in [0, 6] or
+    'FATAL' in db_install_result.stdout
+  when:
+    - not oracle_installed.stat.exists
+    - not db_install_done_sentinel.stat.exists
+  async: 3600
+  poll: 30
+  tags: install
+
+- name: Marcar runInstaller Oracle DB como concluído
+  file:
+    path: "{{ done_dir }}/db_install_done"
+    state: touch
+  when:
+    - not oracle_installed.stat.exists
+    - not db_install_done_sentinel.stat.exists
+  tags: install
+
+- name: Log do instalador (últimas 50 linhas)
+  shell: "tail -50 {{ install_log_dir }}/db_install.log"
+  register: db_log_tail
+  changed_when: false
+  when:
+    - not oracle_installed.stat.exists
+    - not db_install_done_sentinel.stat.exists
+  tags: install
+
+- name: Exibir log de instalação
+  debug:
+    var: db_log_tail.stdout_lines
+  when:
+    - not oracle_installed.stat.exists
+    - not db_install_done_sentinel.stat.exists
+  tags: install
+
+# -----------------------------------------------------------------------------
+# 5. Executar root.sh (como root)
+# No RAC: deve ser executado em TODOS os nós
+# -----------------------------------------------------------------------------
+- name: Verificar sentinela — root.sh Oracle DB
+  stat:
+    path: "{{ done_dir }}/db_root_done"
+  register: db_root_done_sentinel
+  tags: always
+
+- name: Executar root.sh do Oracle Database
+  shell: "{{ oracle_home }}/root.sh 2>&1 | tee -a {{ install_log_dir }}/db_root.log"
+  when:
+    - not oracle_installed.stat.exists
+    - not db_root_done_sentinel.stat.exists
+  register: db_root_result
+  tags: root_scripts
+
+- name: Marcar root.sh Oracle DB como concluído
+  file:
+    path: "{{ done_dir }}/db_root_done"
+    state: touch
+  when:
+    - not oracle_installed.stat.exists
+    - not db_root_done_sentinel.stat.exists
+  tags: root_scripts
+
+- name: Resultado do root.sh do Oracle Database
+  debug:
+    var: db_root_result.stdout_lines
+  when:
+    - not oracle_installed.stat.exists
+    - not db_root_done_sentinel.stat.exists
+  tags: root_scripts
+
+# -----------------------------------------------------------------------------
+# 6. Verificar instalação
+# -----------------------------------------------------------------------------
+- name: Verificar Oracle Home com oraInventory
+  shell: "cat {{ oracle_inventory }}/ContentsXML/inventory.xml | grep -i HOME"
+  register: inventory_check
+  changed_when: false
+  tags: validate
+
+- name: Oracle Homes instalados
+  debug:
+    var: inventory_check.stdout_lines
+  tags: validate
+
+- name: Verificar versão do Oracle instalada
+  shell: "{{ oracle_home }}/bin/sqlplus -V"
+  become_user: "{{ oracle_user }}"
+  environment:
+    ORACLE_HOME: "{{ oracle_home }}"
+  register: oracle_version_check
+  changed_when: false
+  tags: validate
+
+- name: Versão do Oracle
+  debug:
+    var: oracle_version_check.stdout_lines
+  tags: validate
