@@ -1,0 +1,35 @@
+# Parâmetros de kernel para Oracle Database 19c
+# Referência: Oracle Database Installation Guide 19c, Appendix B
+# https://docs.oracle.com/en/database/oracle/oracle-database/19/ladbi/
+
+# Shared Memory — SHMMAX deve ser >= SGA_MAX_SIZE
+# Em sistemas modernos, deixe alto (metade da RAM física é seguro)
+kernel.shmmax = 4294967296
+kernel.shmall = 1048576
+kernel.shmmni = 4096
+
+# Semaphores: semmsl, semmns, semopm, semmni
+# Mínimo Oracle: 250 32000 100 128
+kernel.sem = 250 32000 100 128
+
+# File descriptors
+fs.file-max = 6815744
+fs.aio-max-nr = 1048576
+
+# Portas locais efêmeras
+net.ipv4.ip_local_port_range = 9000 65500
+
+# Network buffers — importante para RAC (interconnect)
+net.core.rmem_default = 262144
+net.core.rmem_max = 4194304
+net.core.wmem_default = 262144
+net.core.wmem_max = 1048576
+
+# Desabilitar transparent hugepages prejudica performance do Oracle SGA
+# (gerenciado via rc.local ou grub — ver template rc_local)
+vm.swappiness = 10
+vm.dirty_background_ratio = 3
+vm.dirty_ratio = 15
+
+# Para RAC: desabilitar NUMA balancing automático pode evitar latências
+# kernel.numa_balancing = 0

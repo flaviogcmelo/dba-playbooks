@@ -1,0 +1,40 @@
+####################################################################
+## Response file para instalação silenciosa do Oracle Grid
+## Infrastructure 19c — Configuração Single Instance (HA_CONFIG)
+##
+## Usado para: Single Instance com ASM (base para Data Guard)
+## Gerado pelo Ansible — grid-install role
+####################################################################
+
+oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
+
+INVENTORY_LOCATION={{ oracle_inventory }}
+
+# HA_CONFIG = Standalone Server / High Availability (GI sem RAC)
+oracle.install.option=HA_CONFIG
+
+ORACLE_BASE={{ grid_base }}
+
+# Grupos do SO
+oracle.install.asm.OSDBA={{ oracle_asmdba_group }}
+oracle.install.asm.OSOPER={{ oracle_asmoper_group }}
+oracle.install.asm.OSASM={{ oracle_asmadmin_group }}
+
+# ============================================================
+# Diskgroup inicial DATA — criado durante a instalação
+# ============================================================
+oracle.install.asm.diskGroup.name={{ asm_data_diskgroup_name }}
+oracle.install.asm.diskGroup.redundancy={{ asm_data_redundancy }}
+oracle.install.asm.diskGroup.AUSize={{ asm_data_au_size }}
+
+# Discos para o diskgroup DATA
+# Para EXTERNAL redundancy: 1 ou mais discos (sem mirroring)
+oracle.install.asm.diskGroup.disks={% for disk in asm_data_disks %}{{ disk }}1{% if not loop.last %},{% endif %}{% endfor %}
+
+# Discovery string
+oracle.install.asm.diskGroup.diskDiscoveryString=/dev/sd*
+
+# ============================================================
+# Senhas
+# ============================================================
+oracle.install.asm.monitorPassword={{ oracle_asm_monitor_password }}

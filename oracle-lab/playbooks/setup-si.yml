@@ -1,0 +1,169 @@
+---
+# =============================================================================
+# Playbook: setup-si.yml
+# Descrição: Instala Oracle Single Instance 19c com GI + ASM
+#            Configura PRIMARY para o ambiente de Data Guard
+#
+# Execução:
+#   # Instalar em todos os nós (primary e standby)
+#   ansible-playbook -i inventory/si/hosts.yml playbooks/setup-si.yml
+#
+#   # Instalar apenas no primary
+#   ansible-playbook -i inventory/si/hosts.yml playbooks/setup-si.yml \
+#     --limit oracle-primary
+#
+#   # Executar apenas uma fase
+#   ansible-playbook -i inventory/si/hosts.yml playbooks/setup-si.yml \
+#     --tags dbca --limit oracle-primary
+# =============================================================================
+
+# ============================================================
+# FASE 1: Pré-requisitos de SO (paralelo em todos os nós)
+# ============================================================
+- name: "FASE 1 — Pré-requisitos de SO"
+  hosts: si_nodes
+  become: yes
+  gather_facts: yes
+  tags: prereqs
+
+  vars:
+    oracle_install_type: SI
+
+  roles:
+    - role: oracle-prereqs
+
+# ============================================================
+# FASE 2: Grid Infrastructure (GI com HA_CONFIG = ASM only)
+# Instala em paralelo em todos os nós (cada um tem seu próprio ASM)
+# ============================================================
+- name: "FASE 2a — Instalar Grid Infrastructure (HA_CONFIG)"
+  hosts: si_nodes
+  become: yes
+  gather_facts: yes
+  tags: grid
+
+  vars:
+    oracle_install_type: SI
+
+  tasks:
+    - name: Executar instalação do GI
+      include_role:
+        name: grid-install
+
+# ============================================================
+- name: "FASE 2b — Executar root.sh do GI em cada nó"
+  hosts: si_nodes
+  become: yes
+  serial: 1
+  gather_facts: no
+  tags: grid_root
+
+  tasks:
+    - name: Executar orainstRoot.sh
+      shell: "{{ oracle_inventory }}/orainstRoot.sh 2>&1"
+      ignore_errors: yes
+
+    - name: Executar root.sh do Grid Infrastructure
+      shell: "{{ grid_home }}/root.sh 2>&1 | tee /tmp/grid_root.log"
+
+# ============================================================
+# FASE 3: Criar diskgroups ASM DATA e FRA em cada nó
+# ============================================================
+- name: "FASE 3 — Criar diskgroups ASM"
+  hosts: si_nodes
+  become: yes
+  gather_facts: no
+  tags: asm
+
+  vars:
+    oracle_install_type: SI
+
+  roles:
+    - role: asm-diskgroups
+
+# ============================================================
+# FASE 4: Instalar software Oracle Database
+# ============================================================
+- name: "FASE 4 — Instalar software Oracle Database 19c"
+  hosts: si_nodes
+  become: yes
+  gather_facts: yes
+  tags: oracle_sw
+
+  vars:
+    oracle_install_type: SI
+
+  roles:
+    - role: oracle-install
+
+# ============================================================
+- name: "FASE 4b — Executar root.sh do Oracle Database"
+  hosts: si_nodes
+  become: yes
+  gather_facts: no
+  tags: oracle_root
+
+  tasks:
+    - name: Executar root.sh
+      shell: "{{ oracle_home }}/root.sh 2>&1"
+
+# ============================================================
+# FASE 5: Criar banco apenas no PRIMARY (standby será criado via RMAN duplicate)
+# ============================================================
+- name: "FASE 5 — Criar banco PRIMARY com DBCA"
+  hosts: si_primary
+  become: yes
+  gather_facts: yes
+  tags: dbca
+
+  vars:
+    oracle_install_type: SI
+    oracle_db_unique_name: "{{ oracle_db_name }}"    # Primary = mesmo nome do DB
+
+  roles:
+    - role: oracle-dbca
+
+# ============================================================
+# FASE 6: Validação do Primary
+# ============================================================
+- name: "FASE 6 — Validação do banco Primary"
+  hosts: si_primary
+  become: yes
+  gather_facts: no
+  tags: validate
+
+  tasks:
+    - name: Verificar status do banco
+      shell: |
+        {{ oracle_home }}/bin/sqlplus -S / as sysdba << 'EOF'
+        SET LINESIZE 200
+        SELECT NAME, DB_UNIQUE_NAME, OPEN_MODE, LOG_MODE, FORCE_LOGGING
+        FROM V$DATABASE;
+
+        SELECT CON_ID, NAME, OPEN_MODE FROM V$PDBS;
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_SID: "{{ oracle_sid }}"
+      register: db_status
+      changed_when: false
+
+    - name: Status do banco Primary
+      debug:
+        var: db_status.stdout_lines
+
+    - name: Verificar diskgroups ASM
+      shell: |
+        {{ grid_home }}/bin/asmcmd lsdg
+      become_user: "{{ grid_user }}"
+      environment:
+        ORACLE_HOME: "{{ grid_home }}"
+        ORACLE_SID: "+ASM"
+      register: dg_status
+      changed_when: false
+
+    - name: Diskgroups disponíveis
+      debug:
+        var: dg_status.stdout_lines

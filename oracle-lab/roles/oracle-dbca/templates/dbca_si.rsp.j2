@@ -1,0 +1,68 @@
+####################################################################
+## Response file DBCA para banco Single Instance 19c
+## Usado para: Primary e Standby do Data Guard
+## Gerado pelo Ansible — oracle-dbca role
+####################################################################
+
+responseFileVersion=/oracle/assistants/rspfmt_dbca_response_schema_v19.0.0
+
+# ============================================================
+# Identificação
+# ============================================================
+gdbName={{ oracle_db_name }}
+sid={{ oracle_sid }}
+databaseConfigType=SI
+
+# DB_UNIQUE_NAME diferente entre primary e standby
+# Para primary: mesmo que DB_NAME (ex: ORCL)
+# Para standby: sufixo diferente  (ex: ORCLSTBY)
+databaseConfigType=SI
+
+# ============================================================
+# Template
+# ============================================================
+templateName=General_Purpose.dbc
+
+# ============================================================
+# Senhas
+# ============================================================
+sysPassword={{ oracle_sys_password }}
+systemPassword={{ oracle_system_password }}
+
+# ============================================================
+# Armazenamento: ASM
+# ============================================================
+storageType=ASM
+diskGroupName=+{{ asm_data_diskgroup_name }}
+recoveryAreaDestination=+{{ asm_fra_diskgroup_name }}
+recoveryAreaSize={{ oracle_fra_size }}
+
+# ============================================================
+# PDB
+# ============================================================
+createAsContainerDatabase=true
+numberOfPDBs=1
+pdbName={{ oracle_pdb_name }}
+pdbAdminPassword={{ oracle_sys_password }}
+
+# ============================================================
+# Memória
+# ============================================================
+totalMemory={{ oracle_memory_target }}
+
+# ============================================================
+# Character set
+# ============================================================
+characterSet={{ oracle_characterset }}
+nationalCharacterSet={{ oracle_ncharacterset }}
+
+# ============================================================
+# Listener
+# ============================================================
+listeners=LISTENER
+
+# ============================================================
+# Archivelog — OBRIGATÓRIO para Data Guard
+# ============================================================
+enableArchiving=true
+archiveLogDest=+{{ asm_fra_diskgroup_name }}

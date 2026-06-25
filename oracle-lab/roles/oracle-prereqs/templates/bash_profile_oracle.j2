@@ -1,0 +1,24 @@
+# .bash_profile para usuário oracle
+# Gerado pelo Ansible — oracle-prereqs role
+
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+
+# Oracle Database environment
+export ORACLE_SID={{ oracle_sid }}
+export ORACLE_BASE={{ oracle_base }}
+export ORACLE_HOME={{ oracle_home }}
+export PATH=$ORACLE_HOME/bin:$ORACLE_HOME/OPatch:$PATH
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+export CLASSPATH=$ORACLE_HOME/jlib:$ORACLE_HOME/rdbms/jlib
+
+# NLS settings
+export NLS_DATE_FORMAT="DD/MM/YYYY HH24:MI:SS"
+export NLS_LANG=AMERICAN_AMERICA.AL32UTF8
+
+# Alias úteis para DBA
+alias sqlplus='rlwrap sqlplus'
+alias rman='rlwrap rman'
+alias dgmgrl='rlwrap dgmgrl'
+alias alert='tail -f $ORACLE_BASE/diag/rdbms/*/*/trace/alert_$ORACLE_SID.log'

@@ -1,0 +1,223 @@
+---
+# =============================================================================
+# Role: asm-diskgroups
+# Descrição: Criação dos diskgroups ASM DATA e FRA após instalação do GI
+#
+# O diskgroup OCR/VOTING (para RAC) é criado automaticamente pelo GI installer.
+# Aqui criamos os diskgroups de dados (DATA) e recuperação (FRA).
+#
+# Referência:
+#   https://docs.oracle.com/en/database/oracle/oracle-database/19/ostmg/
+#   MOS Note: 429537.1 — ASM Disk Group Creation and Management
+# =============================================================================
+
+# Definição do ASM SID conforme o tipo de instalação
+- name: Definir ORACLE_SID do ASM
+  set_fact:
+    asm_sid: >-
+      {% if oracle_install_type == "RAC" %}+ASM{{ hostvars[inventory_hostname]['node_number'] }}{% else %}+ASM{% endif %}
+  tags: always
+
+# -----------------------------------------------------------------------------
+# 1. Verificar discos ASM disponíveis via ASMCMD
+# -----------------------------------------------------------------------------
+- name: Listar discos disponíveis para ASM
+  shell: |
+    {{ grid_home }}/bin/asmcmd afd_lsdsk 2>/dev/null || \
+    {{ grid_home }}/bin/asmcmd lsdsk --discovery 2>/dev/null || true
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    ORACLE_SID: "{{ asm_sid }}"
+    PATH: "{{ grid_home }}/bin:{{ ansible_env.PATH }}"
+  register: asm_disk_list
+  changed_when: false
+  tags: validate
+
+- name: Discos disponíveis para ASM
+  debug:
+    var: asm_disk_list.stdout_lines
+  tags: validate
+
+# -----------------------------------------------------------------------------
+# 2. Verificar diskgroups existentes
+# -----------------------------------------------------------------------------
+- name: Verificar diskgroups ASM existentes
+  shell: |
+    {{ grid_home }}/bin/asmcmd lsdg 2>/dev/null || true
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    ORACLE_SID: "{{ asm_sid }}"
+    PATH: "{{ grid_home }}/bin:{{ ansible_env.PATH }}"
+  register: existing_diskgroups
+  changed_when: false
+  tags: validate
+
+- name: Diskgroups existentes
+  debug:
+    var: existing_diskgroups.stdout_lines
+  tags: validate
+
+# -----------------------------------------------------------------------------
+# 3. Criar diskgroup DATA (se não existir)
+# -----------------------------------------------------------------------------
+- name: Criar diskgroup DATA
+  shell: |
+    {{ grid_home }}/bin/sqlplus -S / as sysasm << 'EOF'
+    SET SERVEROUTPUT ON
+    DECLARE
+      v_exists NUMBER;
+    BEGIN
+      SELECT COUNT(*) INTO v_exists
+      FROM v$asm_diskgroup
+      WHERE name = '{{ asm_data_diskgroup_name }}';
+
+      IF v_exists = 0 THEN
+        EXECUTE IMMEDIATE 'CREATE DISKGROUP {{ asm_data_diskgroup_name }}
+          {{ asm_data_redundancy }} REDUNDANCY
+          FAILGROUP FG1 DISK
+    {% for disk in asm_data_disks %}
+            ''{{ disk }}1'' NAME {{ asm_data_diskgroup_name | lower }}_{{ loop.index }}{% if not loop.last %},{% endif %}
+
+    {% endfor %}
+          ATTRIBUTE
+            ''compatible.asm'' = ''19.0'',
+            ''compatible.rdbms'' = ''19.0'',
+            ''au_size'' = ''{{ asm_data_au_size }}M'',
+            ''cell.smart_scan_capable'' = ''FALSE''';
+        DBMS_OUTPUT.PUT_LINE('Diskgroup {{ asm_data_diskgroup_name }} criado com sucesso.');
+      ELSE
+        DBMS_OUTPUT.PUT_LINE('Diskgroup {{ asm_data_diskgroup_name }} já existe — ignorando.');
+      END IF;
+    END;
+    /
+    EXIT;
+    EOF
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    ORACLE_SID: "{{ asm_sid }}"
+    PATH: "{{ grid_home }}/bin:{{ ansible_env.PATH }}"
+  register: create_data_dg
+  changed_when: "'criado com sucesso' in create_data_dg.stdout"
+  tags: data_diskgroup
+
+- name: Resultado criação diskgroup DATA
+  debug:
+    var: create_data_dg.stdout_lines
+  tags: data_diskgroup
+
+# -----------------------------------------------------------------------------
+# 4. Criar diskgroup FRA (Fast Recovery Area)
+# -----------------------------------------------------------------------------
+- name: Criar diskgroup FRA
+  shell: |
+    {{ grid_home }}/bin/sqlplus -S / as sysasm << 'EOF'
+    SET SERVEROUTPUT ON
+    DECLARE
+      v_exists NUMBER;
+    BEGIN
+      SELECT COUNT(*) INTO v_exists
+      FROM v$asm_diskgroup
+      WHERE name = '{{ asm_fra_diskgroup_name }}';
+
+      IF v_exists = 0 THEN
+        EXECUTE IMMEDIATE 'CREATE DISKGROUP {{ asm_fra_diskgroup_name }}
+          {{ asm_fra_redundancy }} REDUNDANCY
+          FAILGROUP FG1 DISK
+    {% for disk in asm_fra_disks %}
+            ''{{ disk }}1'' NAME {{ asm_fra_diskgroup_name | lower }}_{{ loop.index }}{% if not loop.last %},{% endif %}
+
+    {% endfor %}
+          ATTRIBUTE
+            ''compatible.asm'' = ''19.0'',
+            ''compatible.rdbms'' = ''19.0'',
+            ''au_size'' = ''{{ asm_fra_au_size }}M''';
+        DBMS_OUTPUT.PUT_LINE('Diskgroup {{ asm_fra_diskgroup_name }} criado com sucesso.');
+      ELSE
+        DBMS_OUTPUT.PUT_LINE('Diskgroup {{ asm_fra_diskgroup_name }} já existe — ignorando.');
+      END IF;
+    END;
+    /
+    EXIT;
+    EOF
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    ORACLE_SID: "{{ asm_sid }}"
+    PATH: "{{ grid_home }}/bin:{{ ansible_env.PATH }}"
+  register: create_fra_dg
+  changed_when: "'criado com sucesso' in create_fra_dg.stdout"
+  tags: fra_diskgroup
+
+- name: Resultado criação diskgroup FRA
+  debug:
+    var: create_fra_dg.stdout_lines
+  tags: fra_diskgroup
+
+# -----------------------------------------------------------------------------
+# 5. Registrar diskgroups no CRS/srvctl (somente RAC)
+# O ASMCA registra automaticamente, mas garantimos via srvctl
+# -----------------------------------------------------------------------------
+- name: Verificar diskgroups registrados no CRS (RAC)
+  shell: "{{ grid_home }}/bin/srvctl status diskgroup -diskgroup {{ item }}"
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+  loop:
+    - "{{ asm_data_diskgroup_name }}"
+    - "{{ asm_fra_diskgroup_name }}"
+  register: dg_crs_status
+  changed_when: false
+  ignore_errors: yes
+  when: oracle_install_type == "RAC"
+  tags: validate
+
+- name: Adicionar diskgroup DATA ao CRS (se não registrado)
+  shell: >
+    {{ grid_home }}/bin/srvctl add diskgroup
+    -diskgroup {{ asm_data_diskgroup_name }}
+    -asm
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+  when:
+    - oracle_install_type == "RAC"
+    - dg_crs_status.results[0].rc != 0
+  ignore_errors: yes
+  tags: validate
+
+- name: Adicionar diskgroup FRA ao CRS (se não registrado)
+  shell: >
+    {{ grid_home }}/bin/srvctl add diskgroup
+    -diskgroup {{ asm_fra_diskgroup_name }}
+    -asm
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+  when:
+    - oracle_install_type == "RAC"
+    - dg_crs_status.results[1].rc != 0
+  ignore_errors: yes
+  tags: validate
+
+# -----------------------------------------------------------------------------
+# 6. Validação final: listar diskgroups e espaço
+# -----------------------------------------------------------------------------
+- name: Verificar diskgroups criados e espaço disponível
+  shell: |
+    {{ grid_home }}/bin/asmcmd lsdg
+  become_user: "{{ grid_user }}"
+  environment:
+    ORACLE_HOME: "{{ grid_home }}"
+    ORACLE_SID: "{{ asm_sid }}"
+    PATH: "{{ grid_home }}/bin:{{ ansible_env.PATH }}"
+  register: final_dg_list
+  changed_when: false
+  tags: validate
+
+- name: Diskgroups disponíveis
+  debug:
+    var: final_dg_list.stdout_lines
+  tags: validate

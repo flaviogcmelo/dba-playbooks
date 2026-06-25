@@ -1,0 +1,21 @@
+# .bash_profile para usuário grid
+# Gerado pelo Ansible — oracle-prereqs role
+
+if [ -f ~/.bashrc ]; then
+    . ~/.bashrc
+fi
+
+# Grid Infrastructure environment
+export ORACLE_SID=+ASM{% if oracle_install_type == "RAC" %}{{ hostvars[inventory_hostname]['node_number'] }}{% endif %}
+
+export ORACLE_BASE={{ grid_base }}
+export ORACLE_HOME={{ grid_home }}
+export PATH=$ORACLE_HOME/bin:$ORACLE_HOME/OPatch:$PATH
+export LD_LIBRARY_PATH=$ORACLE_HOME/lib:/lib:/usr/lib
+export CLASSPATH=$ORACLE_HOME/jlib:$ORACLE_HOME/rdbms/jlib
+
+# Alias úteis para DBA
+alias sqlplus='rlwrap sqlplus'
+alias asmcmd='$ORACLE_HOME/bin/asmcmd'
+alias crsstat='$ORACLE_HOME/bin/crsctl status res -t'
+alias crscheck='$ORACLE_HOME/bin/crsctl check cluster -all'

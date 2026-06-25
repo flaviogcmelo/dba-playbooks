@@ -1,0 +1,77 @@
+####################################################################
+## Response file para instalação silenciosa do Oracle Grid
+## Infrastructure 19c — Configuração RAC (CRS_CONFIG)
+##
+## Gerado pelo Ansible — grid-install role
+## Referência: $GRID_HOME/install/response/gridsetup.rsp
+## Doc: https://docs.oracle.com/en/database/oracle/oracle-database/19/cwlin/
+####################################################################
+
+oracle.install.responseFileVersion=/oracle/install/rspfmt_crsinstall_response_schema_v19.0.0
+
+# Diretório do Oracle Inventory
+INVENTORY_LOCATION={{ oracle_inventory }}
+
+# Tipo de instalação: CRS_CONFIG = RAC, HA_CONFIG = Single Instance ASM
+oracle.install.option=CRS_CONFIG
+
+# Oracle Base para o usuário grid
+ORACLE_BASE={{ grid_base }}
+
+# Grupos do SO
+oracle.install.asm.OSDBA={{ oracle_asmdba_group }}
+oracle.install.asm.OSOPER={{ oracle_asmoper_group }}
+oracle.install.asm.OSASM={{ oracle_asmadmin_group }}
+
+# ============================================================
+# Configuração do Cluster
+# ============================================================
+# Nome do cluster (max 15 caracteres, sem espaços)
+oracle.install.crs.config.ClusterName={{ cluster_name }}
+
+# Modo de cluster: STANDALONE ou DOMAIN (para Extended Cluster)
+oracle.install.crs.config.clusterMode=STANDALONE
+
+# SCAN (Single Client Access Name)
+oracle.install.crs.config.gpnp.scanName={{ scan_name }}
+oracle.install.crs.config.gpnp.scanPort={{ scan_port }}
+
+# Nós do cluster: hostname:vip[,hostname2:vip2,...]
+oracle.install.crs.config.clusterNodes={% for host in groups['rac_nodes'] %}{{ hostvars[host]['oracle_hostname'] }}:{{ hostvars[host]['oracle_vip'] }}{% if not loop.last %},{% endif %}{% endfor %}
+
+# Interfaces de rede: nome:subnet:tipo
+# Tipo: 1=PUBLIC, 2=ASM&PRIVATE, 3=ASM, 4=PRIVATE, 5=DO_NOT_USE
+oracle.install.crs.config.networkInterfaceList={{ public_interface }}:{{ public_network }}:1,{{ private_interface }}:{{ private_network }}:5
+
+# ============================================================
+# Configuração do Storage (ASM)
+# ============================================================
+# Opção de storage para o OCR/VOTING
+oracle.install.crs.config.storageOption=FLEX_ASM_STORAGE
+
+# Diskgroup inicial (OCR/VOTING) — criado durante instalação do GI
+oracle.install.asm.diskGroup.name={{ asm_ocr_diskgroup_name }}
+oracle.install.asm.diskGroup.redundancy={{ asm_ocr_redundancy }}
+oracle.install.asm.diskGroup.AUSize={{ asm_ocr_au_size }}
+
+# Discos para o diskgroup OCR (separados por vírgula)
+# Para VirtualBox: use o path da partição ex: /dev/sdb1,/dev/sdc1,/dev/sdd1
+# Sintaxe com failure groups: /dev/sdb1:FG1,/dev/sdc1:FG2,/dev/sdd1:FG3
+oracle.install.asm.diskGroup.disksWithFailureGroupNames={% for disk in asm_ocr_disks %}{{ disk }}1:{% endfor %}
+
+# Discovery string para localizar os discos ASM
+oracle.install.asm.diskGroup.diskDiscoveryString=/dev/sd*
+
+# ============================================================
+# Senhas do ASM
+# ============================================================
+oracle.install.asm.monitorPassword={{ oracle_asm_monitor_password }}
+
+# ============================================================
+# Configurações avançadas (opcional)
+# ============================================================
+# Ignorar falhas de pré-requisito (útil para lab)
+oracle.install.crs.config.ignoreDownNodes=false
+
+# GNS (Grid Naming Service) — não necessário para lab com /etc/hosts
+oracle.install.crs.config.gpnp.configureGNS=false

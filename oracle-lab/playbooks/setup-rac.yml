@@ -1,0 +1,231 @@
+---
+# =============================================================================
+# Playbook: setup-rac.yml
+# Descrição: Instala Oracle RAC 19c com Grid Infrastructure + ASM em 2 nós
+#
+# Pré-requisitos:
+#   1. VMs criadas no VirtualBox com Oracle Linux 8
+#   2. Shared disks configurados (ver README)
+#   3. Binários do Oracle em {{ oracle_installer_source }}
+#   4. Acesso SSH root configurado
+#
+# Execução:
+#   ansible-playbook -i inventory/rac/hosts.yml playbooks/setup-rac.yml
+#   ansible-playbook -i inventory/rac/hosts.yml playbooks/setup-rac.yml --tags prereqs
+#   ansible-playbook -i inventory/rac/hosts.yml playbooks/setup-rac.yml --tags grid
+#
+# Para instalar em nó específico:
+#   ansible-playbook -i inventory/rac/hosts.yml playbooks/setup-rac.yml --limit rac1
+# =============================================================================
+
+# ============================================================
+# FASE 1: Pré-requisitos em TODOS os nós (paralelo)
+# ============================================================
+- name: "FASE 1 — Pré-requisitos de SO em todos os nós RAC"
+  hosts: rac_nodes
+  become: yes
+  gather_facts: yes
+  tags: prereqs
+
+  vars:
+    oracle_install_type: RAC
+
+  roles:
+    - role: oracle-prereqs
+
+  post_tasks:
+    - name: Reiniciar VMs para aplicar parâmetros de kernel (se necessário)
+      reboot:
+        reboot_timeout: 300
+        msg: "Reiniciando para aplicar configurações de kernel Oracle"
+      when: ansible_facts['kernel'] is version('4.0', '<')
+      tags: reboot
+
+# ============================================================
+# FASE 2: Grid Infrastructure — instala do nó 1, root.sh em todos
+# ============================================================
+- name: "FASE 2a — Extrair e instalar GI (inicia do nó 1)"
+  hosts: rac_primary_node
+  become: yes
+  gather_facts: yes
+  tags: grid
+
+  vars:
+    oracle_install_type: RAC
+
+  tasks:
+    - name: Extrair GI e executar gridSetup.sh -silent
+      include_role:
+        name: grid-install
+      vars:
+        run_root_scripts: false    # root.sh será executado na fase seguinte
+
+# ============================================================
+- name: "FASE 2b — Executar root.sh do GI em TODOS os nós (sequencial)"
+  hosts: rac_nodes
+  become: yes
+  serial: 1    # CRÍTICO: root.sh deve rodar um nó de cada vez, na ordem
+  gather_facts: no
+  tags: grid_root
+
+  tasks:
+    - name: Verificar se GI já foi instalado
+      stat:
+        path: "{{ grid_home }}/bin/crsctl"
+      register: gi_check
+
+    - name: Executar orainstRoot.sh
+      shell: "{{ oracle_inventory }}/orainstRoot.sh 2>&1"
+      when: gi_check.stat.exists
+      ignore_errors: yes
+
+    - name: Executar root.sh do Grid Infrastructure
+      shell: "{{ grid_home }}/root.sh 2>&1 | tee /tmp/grid_root_{{ inventory_hostname }}.log"
+      when: gi_check.stat.exists
+      register: grid_root_output
+
+    - name: Aguardar 30s antes do próximo nó
+      pause:
+        seconds: 30
+      when: gi_check.stat.exists
+
+# ============================================================
+- name: "FASE 2c — Executar configTools (finaliza configuração do GI)"
+  hosts: rac_primary_node
+  become: yes
+  gather_facts: no
+  tags: grid_config
+
+  vars:
+    oracle_install_type: RAC
+
+  tasks:
+    - name: Executar gridSetup.sh -executeConfigTools
+      shell: >
+        {{ grid_home }}/gridSetup.sh
+        -silent
+        -executeConfigTools
+        -responseFile {{ oracle_stage_dir }}/grid_install.rsp
+        -ignorePrereqFailure
+        2>&1 | tee {{ install_log_dir }}/grid_configtools.log
+      become_user: "{{ grid_user }}"
+      environment:
+        ORACLE_HOME: "{{ grid_home }}"
+      async: 3600
+      poll: 30
+
+# ============================================================
+# FASE 3: ASM Diskgroups DATA e FRA (apenas do nó 1)
+# ============================================================
+- name: "FASE 3 — Criar diskgroups ASM (DATA e FRA)"
+  hosts: rac_primary_node
+  become: yes
+  gather_facts: no
+  tags: asm
+
+  vars:
+    oracle_install_type: RAC
+
+  roles:
+    - role: asm-diskgroups
+
+# ============================================================
+# FASE 4: Instalar Oracle Database software em TODOS os nós
+# ============================================================
+- name: "FASE 4 — Instalar software Oracle Database 19c"
+  hosts: rac_nodes
+  become: yes
+  gather_facts: yes
+  tags: oracle_sw
+
+  vars:
+    oracle_install_type: RAC
+
+  roles:
+    - role: oracle-install
+
+# ============================================================
+# FASE 5: root.sh do Oracle Database em todos os nós
+# ============================================================
+- name: "FASE 5 — Executar root.sh do Oracle Database (todos os nós, sequencial)"
+  hosts: rac_nodes
+  become: yes
+  serial: 1
+  gather_facts: no
+  tags: oracle_root
+
+  tasks:
+    - name: Executar root.sh do Oracle Home
+      shell: "{{ oracle_home }}/root.sh 2>&1 | tee /tmp/oracle_root_{{ inventory_hostname }}.log"
+      register: oracle_root_out
+
+    - name: Aguardar 15s
+      pause:
+        seconds: 15
+
+# ============================================================
+# FASE 6: Criar banco RAC com DBCA (apenas do nó 1)
+# ============================================================
+- name: "FASE 6 — Criar banco RAC com DBCA"
+  hosts: rac_primary_node
+  become: yes
+  gather_facts: yes
+  tags: dbca
+
+  vars:
+    oracle_install_type: RAC
+
+  roles:
+    - role: oracle-dbca
+
+# ============================================================
+# FASE 7: Validação final
+# ============================================================
+- name: "FASE 7 — Validação final do ambiente RAC"
+  hosts: rac_primary_node
+  become: yes
+  gather_facts: no
+  tags: validate
+
+  tasks:
+    - name: Status do Clusterware
+      shell: "{{ grid_home }}/bin/crsctl status res -t"
+      become_user: "{{ grid_user }}"
+      environment:
+        ORACLE_HOME: "{{ grid_home }}"
+      register: crs_resources
+      changed_when: false
+
+    - name: Recursos do CRS
+      debug:
+        var: crs_resources.stdout_lines
+
+    - name: Status do banco RAC
+      shell: "{{ oracle_home }}/bin/srvctl status database -db {{ oracle_db_name }}"
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+      register: db_status
+      changed_when: false
+
+    - name: Status do banco
+      debug:
+        var: db_status.stdout_lines
+
+    - name: Verificar instâncias abertas
+      shell: |
+        {{ oracle_home }}/bin/sqlplus -S / as sysdba << 'EOF'
+        SELECT INST_ID, INSTANCE_NAME, HOST_NAME, STATUS, DATABASE_STATUS
+        FROM GV$INSTANCE ORDER BY INST_ID;
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_SID: "{{ oracle_sid }}1"
+      register: instances_status
+      changed_when: false
+
+    - name: Instâncias do RAC
+      debug:
+        var: instances_status.stdout_lines

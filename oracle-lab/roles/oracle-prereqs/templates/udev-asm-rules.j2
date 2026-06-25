@@ -1,0 +1,14 @@
+# Regras udev para discos ASM — geradas pelo Ansible
+# Garante que os discos tenham dono grid:asmadmin e permissão 0660
+# Referência: MOS Note 1937060.1 — Using Udev for ASM on Oracle Linux
+
+# ATENÇÃO: Ajuste os KERNEL values conforme os discos da sua VM
+# Use: udevadm info --query=all --name=/dev/sdX | grep KERNEL
+# Ou:  ls -l /dev/disk/by-id/ para identificar por serial/UUID
+
+{% set all_asm_disks = (asm_ocr_disks | default([])) + asm_data_disks + asm_fra_disks %}
+{% for disk in all_asm_disks %}
+# Disco: {{ disk }}
+KERNEL=="{{ disk | basename }}[0-9]", SUBSYSTEM=="block", OWNER="{{ grid_user }}", GROUP="{{ oracle_asmadmin_group }}", MODE="0660", SYMLINK+="oracleasm/{{ disk | basename }}%n"
+KERNEL=="{{ disk | basename }}", SUBSYSTEM=="block", OWNER="{{ grid_user }}", GROUP="{{ oracle_asmadmin_group }}", MODE="0660", SYMLINK+="oracleasm/{{ disk | basename }}"
+{% endfor %}

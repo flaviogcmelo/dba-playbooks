@@ -1,0 +1,44 @@
+# /etc/hosts gerado pelo Ansible — oracle-prereqs role
+# NÃO EDITAR MANUALMENTE
+
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+
+{% if oracle_install_type == "RAC" %}
+# ============================================================
+# Oracle RAC — Nós públicos
+# ============================================================
+{% for host in groups['rac_nodes'] %}
+{{ hostvars[host]['ansible_host'] }}    {{ hostvars[host]['oracle_hostname'] }}.localdomain  {{ hostvars[host]['oracle_hostname'] }}
+{% endfor %}
+
+# ============================================================
+# Oracle RAC — VIPs (Virtual IPs)
+# ============================================================
+{% for host in groups['rac_nodes'] %}
+{{ hostvars[host]['oracle_vip'] }}      {{ hostvars[host]['oracle_hostname'] }}-vip.localdomain  {{ hostvars[host]['oracle_hostname'] }}-vip
+{% endfor %}
+
+# ============================================================
+# Oracle RAC — Interconnect privado (não use DNS para rede privada)
+# ============================================================
+{% for host in groups['rac_nodes'] %}
+{{ hostvars[host]['oracle_private_ip'] }}   {{ hostvars[host]['oracle_hostname'] }}-priv.localdomain  {{ hostvars[host]['oracle_hostname'] }}-priv
+{% endfor %}
+
+# ============================================================
+# Oracle RAC — SCAN IPs (Single Client Access Name)
+# Em produção, mova o SCAN para DNS (recomendado pela Oracle)
+# ============================================================
+{{ scan_ip1 }}   {{ scan_name }}.localdomain  {{ scan_name }}
+{{ scan_ip2 }}   {{ scan_name }}.localdomain  {{ scan_name }}
+{{ scan_ip3 }}   {{ scan_name }}.localdomain  {{ scan_name }}
+
+{% else %}
+# ============================================================
+# Oracle Single Instance — Data Guard
+# ============================================================
+{% for host in groups['si_nodes'] %}
+{{ hostvars[host]['ansible_host'] }}    {{ hostvars[host]['oracle_hostname'] }}.localdomain  {{ hostvars[host]['oracle_hostname'] }}
+{% endfor %}
+{% endif %}

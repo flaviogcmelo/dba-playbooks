@@ -1,0 +1,290 @@
+---
+# =============================================================================
+# Playbook: setup-dataguard.yml
+# Descrição: Configura Data Guard entre Primary (oracle-primary) e
+#            Standby (oracle-standby) usando RMAN DUPLICATE ... FOR STANDBY
+#
+# PRÉ-REQUISITOS:
+#   1. setup-si.yml já executado em ambos os nós
+#   2. Banco PRIMARY criado (oracle-primary)
+#   3. GI + ASM operacional no oracle-standby (sem banco)
+#   4. Conectividade Oracle Net entre primary e standby
+#
+# Execução:
+#   ansible-playbook -i inventory/si/hosts.yml playbooks/setup-dataguard.yml
+# =============================================================================
+
+# ============================================================
+# FASE 1: Configurar listener e tnsnames para comunicação DG
+# ============================================================
+- name: "FASE 1 — Configurar Oracle Net (listener + tnsnames)"
+  hosts: si_nodes
+  become: yes
+  gather_facts: yes
+  tags: network
+
+  tasks:
+    - name: Gerar tnsnames.ora com entradas de Primary e Standby
+      template:
+        src: "{{ playbook_dir }}/../roles/oracle-dbca/templates/tnsnames_dg.ora.j2"
+        dest: "{{ oracle_home }}/network/admin/tnsnames.ora"
+        owner: "{{ oracle_user }}"
+        group: "{{ oracle_group }}"
+        mode: "0644"
+
+    - name: Gerar listener.ora (static listener para DG)
+      template:
+        src: "{{ playbook_dir }}/../roles/oracle-dbca/templates/listener_dg.ora.j2"
+        dest: "{{ oracle_home }}/network/admin/listener.ora"
+        owner: "{{ oracle_user }}"
+        group: "{{ oracle_group }}"
+        mode: "0644"
+
+    - name: Recarregar listener
+      shell: |
+        {{ oracle_home }}/bin/lsnrctl reload LISTENER
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH }}"
+      ignore_errors: yes
+
+# ============================================================
+# FASE 2: Configurar Primary para Data Guard
+# ============================================================
+- name: "FASE 2 — Configurar banco Primary para Data Guard"
+  hosts: si_primary
+  become: yes
+  gather_facts: yes
+  tags: primary_config
+
+  tasks:
+    - name: Configurar parâmetros do Primary para Data Guard
+      shell: |
+        {{ oracle_home }}/bin/sqlplus -S / as sysdba << 'EOF'
+        -- Parâmetros essenciais do Primary
+        ALTER SYSTEM SET LOG_ARCHIVE_CONFIG='DG_CONFIG=({{ oracle_db_name }},{{ oracle_db_name }}STBY)' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ oracle_db_name }}' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_2='SERVICE={{ oracle_db_name }}STBY ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ oracle_db_name }}STBY' SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_1=ENABLE SCOPE=BOTH;
+        ALTER SYSTEM SET LOG_ARCHIVE_DEST_STATE_2=ENABLE SCOPE=BOTH;
+        ALTER SYSTEM SET REMOTE_LOGIN_PASSWORDFILE=EXCLUSIVE SCOPE=SPFILE;
+        ALTER SYSTEM SET LOG_ARCHIVE_FORMAT='%t_%s_%r.dbf' SCOPE=SPFILE;
+        ALTER SYSTEM SET FAL_SERVER={{ oracle_db_name }}STBY SCOPE=BOTH;
+        ALTER SYSTEM SET FAL_CLIENT={{ oracle_db_name }} SCOPE=BOTH;
+        ALTER SYSTEM SET STANDBY_FILE_MANAGEMENT=AUTO SCOPE=BOTH;
+        ALTER SYSTEM SET DG_BROKER_START=TRUE SCOPE=BOTH;
+        ALTER SYSTEM SET DG_BROKER_CONFIG_FILE1='+{{ asm_data_diskgroup_name }}/{{ oracle_db_name }}/dr1{{ oracle_db_name | lower }}.dat' SCOPE=BOTH;
+        ALTER SYSTEM SET DG_BROKER_CONFIG_FILE2='+{{ asm_fra_diskgroup_name }}/{{ oracle_db_name }}/dr2{{ oracle_db_name | lower }}.dat' SCOPE=BOTH;
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_SID: "{{ oracle_sid }}"
+        PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH }}"
+      tags: primary_params
+
+    - name: Criar Standby Redo Logs no Primary
+      shell: |
+        {{ oracle_home }}/bin/sqlplus -S / as sysdba << 'EOF'
+        -- Standby Redo Logs: tamanho igual ao online redo log
+        -- Quantidade: (threads * (grupos_redo + 1)) + 1
+        DECLARE
+          v_size NUMBER;
+          v_count NUMBER;
+        BEGIN
+          SELECT BYTES INTO v_size FROM V$LOG WHERE ROWNUM = 1;
+          SELECT COUNT(*) INTO v_count FROM V$STANDBY_LOG;
+          IF v_count = 0 THEN
+            FOR i IN 1..4 LOOP
+              EXECUTE IMMEDIATE 'ALTER DATABASE ADD STANDBY LOGFILE GROUP ' ||
+                (100 + i) || ' SIZE ' || (v_size/1024/1024) || 'M';
+            END LOOP;
+            DBMS_OUTPUT.PUT_LINE('Standby Redo Logs criados.');
+          ELSE
+            DBMS_OUTPUT.PUT_LINE('Standby Redo Logs já existem (' || v_count || ').');
+          END IF;
+        END;
+        /
+        SELECT GROUP#, BYTES/1024/1024 AS SIZE_MB, STATUS FROM V$STANDBY_LOG;
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_SID: "{{ oracle_sid }}"
+        PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH }}"
+      register: srl_result
+      tags: standby_redo_logs
+
+    - name: Resultado criação dos Standby Redo Logs
+      debug:
+        var: srl_result.stdout_lines
+      tags: standby_redo_logs
+
+    - name: Copiar password file para o Standby
+      shell: |
+        scp {{ oracle_home }}/dbs/orapw{{ oracle_sid }} \
+          {{ oracle_user }}@{{ hostvars['oracle-standby']['ansible_host'] }}:{{ oracle_home }}/dbs/orapw{{ oracle_sid }}
+      become_user: "{{ oracle_user }}"
+      tags: password_file
+
+# ============================================================
+# FASE 3: Criar banco Standby via RMAN DUPLICATE
+# ============================================================
+- name: "FASE 3 — Criar banco Standby via RMAN DUPLICATE"
+  hosts: si_standby
+  become: yes
+  gather_facts: yes
+  tags: standby_create
+
+  tasks:
+    - name: Criar pfile mínimo para inicializar o Standby (modo nomount)
+      shell: |
+        mkdir -p {{ oracle_base }}/admin/{{ oracle_db_name }}/adump
+        cat > {{ oracle_home }}/dbs/init{{ oracle_sid }}.ora << 'EOF'
+        DB_NAME={{ oracle_db_name }}
+        DB_UNIQUE_NAME={{ oracle_db_name }}STBY
+        EOF
+      become_user: "{{ oracle_user }}"
+      tags: standby_init
+
+    - name: Iniciar instância Standby em NOMOUNT
+      shell: |
+        {{ oracle_home }}/bin/sqlplus -S / as sysdba << 'EOF'
+        STARTUP NOMOUNT PFILE='{{ oracle_home }}/dbs/init{{ oracle_sid }}.ora';
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_SID: "{{ oracle_sid }}"
+        PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH }}"
+      ignore_errors: yes
+      tags: standby_init
+
+    - name: Executar RMAN DUPLICATE para criar o Standby
+      shell: |
+        {{ oracle_home }}/bin/rman << 'EOF'
+        CONNECT TARGET sys/{{ oracle_sys_password }}@{{ oracle_db_name }};
+        CONNECT AUXILIARY sys/{{ oracle_sys_password }}@{{ oracle_db_name }}STBY;
+
+        DUPLICATE TARGET DATABASE
+          FOR STANDBY
+          FROM ACTIVE DATABASE
+          DORECOVER
+          SPFILE
+            SET DB_UNIQUE_NAME='{{ oracle_db_name }}STBY'
+            SET LOG_ARCHIVE_DEST_1='LOCATION=USE_DB_RECOVERY_FILE_DEST VALID_FOR=(ALL_LOGFILES,ALL_ROLES) DB_UNIQUE_NAME={{ oracle_db_name }}STBY'
+            SET LOG_ARCHIVE_DEST_2='SERVICE={{ oracle_db_name }} ASYNC VALID_FOR=(ONLINE_LOGFILES,PRIMARY_ROLE) DB_UNIQUE_NAME={{ oracle_db_name }}'
+            SET FAL_SERVER='{{ oracle_db_name }}'
+            SET FAL_CLIENT='{{ oracle_db_name }}STBY'
+            SET STANDBY_FILE_MANAGEMENT='AUTO'
+            SET DG_BROKER_START='TRUE'
+          NOFILENAMECHECK;
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_SID: "{{ oracle_sid }}"
+        PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH }}"
+      register: rman_duplicate
+      async: 7200    # 2h timeout — depende do tamanho do banco
+      poll: 60
+      tags: rman_duplicate
+
+    - name: Resultado RMAN DUPLICATE
+      debug:
+        var: rman_duplicate.stdout_lines
+      tags: rman_duplicate
+
+# ============================================================
+# FASE 4: Configurar DG Broker
+# ============================================================
+- name: "FASE 4 — Configurar Data Guard Broker (DGMGRL)"
+  hosts: si_primary
+  become: yes
+  gather_facts: no
+  tags: dgmgrl
+
+  tasks:
+    - name: Criar configuração no DG Broker
+      shell: |
+        {{ oracle_home }}/bin/dgmgrl sys/{{ oracle_sys_password }}@{{ oracle_db_name }} << 'EOF'
+        CREATE CONFIGURATION 'DG_{{ oracle_db_name }}' AS
+          PRIMARY DATABASE IS '{{ oracle_db_name }}'
+          CONNECT IDENTIFIER IS '{{ oracle_db_name }}';
+
+        ADD DATABASE '{{ oracle_db_name }}STBY' AS
+          CONNECT IDENTIFIER IS '{{ oracle_db_name }}STBY'
+          MAINTAINED AS PHYSICAL;
+
+        ENABLE CONFIGURATION;
+        SHOW CONFIGURATION VERBOSE;
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_SID: "{{ oracle_sid }}"
+        PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH }}"
+      register: dgmgrl_result
+      tags: broker_config
+
+    - name: Configuração do DG Broker
+      debug:
+        var: dgmgrl_result.stdout_lines
+      tags: broker_config
+
+# ============================================================
+# FASE 5: Validação final do Data Guard
+# ============================================================
+- name: "FASE 5 — Validação do Data Guard"
+  hosts: si_primary
+  become: yes
+  gather_facts: no
+  tags: validate
+
+  tasks:
+    - name: Verificar status do Data Guard via DGMGRL
+      shell: |
+        {{ oracle_home }}/bin/dgmgrl sys/{{ oracle_sys_password }}@{{ oracle_db_name }} << 'EOF'
+        SHOW CONFIGURATION;
+        SHOW DATABASE VERBOSE '{{ oracle_db_name }}';
+        SHOW DATABASE VERBOSE '{{ oracle_db_name }}STBY';
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        ORACLE_SID: "{{ oracle_sid }}"
+        PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH }}"
+      register: dg_status
+      changed_when: false
+
+    - name: Status do Data Guard
+      debug:
+        var: dg_status.stdout_lines
+
+    - name: Verificar lag de aplicação no Standby
+      shell: |
+        {{ oracle_home }}/bin/sqlplus -S sys/{{ oracle_sys_password }}@{{ oracle_db_name }}STBY as sysdba << 'EOF'
+        SELECT NAME, VALUE, UNIT, TIME_COMPUTED
+        FROM V$DATAGUARD_STATS
+        WHERE NAME IN ('apply lag','transport lag','estimated startup time')
+        ORDER BY NAME;
+        EXIT;
+        EOF
+      become_user: "{{ oracle_user }}"
+      environment:
+        ORACLE_HOME: "{{ oracle_home }}"
+        PATH: "{{ oracle_home }}/bin:{{ ansible_env.PATH }}"
+      register: dg_stats
+      changed_when: false
+      ignore_errors: yes
+
+    - name: Estatísticas do Data Guard
+      debug:
+        var: dg_stats.stdout_lines

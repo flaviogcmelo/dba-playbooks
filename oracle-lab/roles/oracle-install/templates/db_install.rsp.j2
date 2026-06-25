@@ -1,0 +1,55 @@
+####################################################################
+## Response file para instalação silenciosa do Oracle Database 19c
+## Modalidade: INSTALL_DB_SWONLY (software only)
+##
+## Gerado pelo Ansible — oracle-install role
+## Referência: $ORACLE_HOME/install/response/db_install.rsp
+####################################################################
+
+oracle.install.responseFileVersion=/oracle/install/rspfmt_dbinstall_response_schema_v19.0.0
+
+# ============================================================
+# Opção de instalação
+# INSTALL_DB_SWONLY = Instala apenas o software
+# INSTALL_DB_AND_CONFIG = Software + cria banco (não recomendado para lab)
+# ============================================================
+oracle.install.option=INSTALL_DB_SWONLY
+
+# Grupo primário (oinstall)
+UNIX_GROUP_NAME={{ oracle_group }}
+
+# Oracle Inventory
+INVENTORY_LOCATION={{ oracle_inventory }}
+
+# Oracle Home e Base
+ORACLE_HOME={{ oracle_home }}
+ORACLE_BASE={{ oracle_base }}
+
+# ============================================================
+# Edição
+# ============================================================
+oracle.install.db.InstallEdition=EE
+
+# ============================================================
+# Grupos do SO — mapeamento DBA/OPER
+# ============================================================
+oracle.install.db.OSDBA_GROUP={{ oracle_dba_group }}
+oracle.install.db.OSOPER_GROUP={{ oracle_oper_group }}
+oracle.install.db.OSBACKUPDBA_GROUP={{ oracle_backupdba_group }}
+oracle.install.db.OSDGDBA_GROUP={{ oracle_dgdba_group }}
+oracle.install.db.OSKMDBA_GROUP={{ oracle_kmdba_group }}
+oracle.install.db.OSRACDBA_GROUP={{ oracle_racdba_group }}
+
+# ============================================================
+# Configurações para RAC
+# ============================================================
+{% if oracle_install_type == "RAC" %}
+# Lista de nós do cluster para instalação do Oracle Home
+oracle.install.db.CLUSTER_NODES={{ groups['rac_nodes'] | map('extract', hostvars, 'oracle_hostname') | join(',') }}
+{% endif %}
+
+# ============================================================
+# Execução automática do root.sh
+# false = Ansible executa manualmente (mais controle)
+# ============================================================
+oracle.install.db.rootconfig.executeRootScript=false

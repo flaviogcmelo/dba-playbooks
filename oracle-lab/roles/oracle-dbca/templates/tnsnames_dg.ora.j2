@@ -1,0 +1,21 @@
+# tnsnames.ora — Gerado pelo Ansible para ambiente Data Guard
+# Deve estar presente em TODOS os nós (primary e standby)
+
+{{ oracle_db_name }} =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = {{ hostvars['oracle-primary']['oracle_hostname'] }})(PORT = {{ oracle_listener_port }}))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = {{ oracle_db_name }})
+    )
+  )
+
+{{ oracle_db_name }}STBY =
+  (DESCRIPTION =
+    (ADDRESS = (PROTOCOL = TCP)(HOST = {{ hostvars['oracle-standby']['oracle_hostname'] }})(PORT = {{ oracle_listener_port }}))
+    (CONNECT_DATA =
+      (SERVER = DEDICATED)
+      (SERVICE_NAME = {{ oracle_db_name }}STBY)
+      (UR = A)
+    )
+  )

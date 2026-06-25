@@ -1,0 +1,84 @@
+####################################################################
+## Response file DBCA para criação de banco RAC 19c
+## Gerado pelo Ansible — oracle-dbca role
+##
+## Referência:
+##   https://docs.oracle.com/en/database/oracle/oracle-database/19/admin/
+####################################################################
+
+responseFileVersion=/oracle/assistants/rspfmt_dbca_response_schema_v19.0.0
+
+# ============================================================
+# Identificação do banco
+# ============================================================
+gdbName={{ oracle_db_name }}
+sid={{ oracle_db_name }}
+databaseConfigType=RAC
+
+# Nós do RAC
+nodelist={{ groups['rac_nodes'] | map('extract', hostvars, 'oracle_hostname') | join(',') }}
+
+# Policy managed ou admin managed
+# POLICY: usa Server Pools (recomendado no 19c)
+# ADMIN: comportamento clássico (nodelist obrigatório)
+RACOneNodeServiceName=
+
+# ============================================================
+# Template do banco
+# General_Purpose.dbc = bancos OLTP genéricos
+# Data_Warehouse.dbc = bancos analíticos
+# ============================================================
+templateName=General_Purpose.dbc
+
+# ============================================================
+# Senhas (em produção use Vault)
+# ============================================================
+sysPassword={{ oracle_sys_password }}
+systemPassword={{ oracle_system_password }}
+
+# ============================================================
+# Armazenamento: ASM
+# ============================================================
+storageType=ASM
+diskGroupName=+{{ asm_data_diskgroup_name }}
+recoveryAreaDestination=+{{ asm_fra_diskgroup_name }}
+recoveryAreaSize={{ oracle_fra_size }}
+
+# ============================================================
+# PDB (Pluggable Database)
+# ============================================================
+createAsContainerDatabase=true
+numberOfPDBs=1
+pdbName={{ oracle_pdb_name }}
+pdbAdminPassword={{ oracle_sys_password }}
+
+# ============================================================
+# Configurações de memória
+# ============================================================
+# totalMemory em MB — DBCA calcula SGA/PGA automaticamente
+# Se quiser controle manual, use sga/pga em vez de totalMemory
+totalMemory={{ oracle_memory_target }}
+
+# ============================================================
+# Configurações de armazenamento dos redo logs
+# ============================================================
+# Número de grupos de redo log (mínimo recomendado para RAC: 2 por nó)
+redoLogFileSize=200
+numberOfDatafilesForInitialDatabase=1
+
+# ============================================================
+# Character set
+# ============================================================
+characterSet={{ oracle_characterset }}
+nationalCharacterSet={{ oracle_ncharacterset }}
+
+# ============================================================
+# Listener — usa o listener configurado pelo GI
+# ============================================================
+listeners=LISTENER
+
+# ============================================================
+# Archivelog e FORCE LOGGING (obrigatório para Data Guard)
+# ============================================================
+enableArchiving=true
+archiveLogDest=+{{ asm_fra_diskgroup_name }}
