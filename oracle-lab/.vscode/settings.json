@@ -1,0 +1,45 @@
+{
+  "ansible.ansible.path": "ansible",
+  "ansible.python.interpreterPath": "/usr/bin/python3",
+  "ansible.validation.enabled": true,
+  "ansible.validation.lint.enabled": true,
+  "ansible.validation.lint.arguments": "--profile=production",
+  "ansible.completion.provideRedirectModules": true,
+  "ansible.completion.provideModuleOptionAliases": true,
+  "[ansible]": {
+    "editor.detectIndentation": false,
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true,
+    "editor.autoIndent": "advanced"
+  },
+  "[yaml]": {
+    "editor.defaultFormatter": "redhat.vscode-yaml",
+    "editor.detectIndentation": false,
+    "editor.tabSize": 2,
+    "editor.insertSpaces": true
+  },
+  "yaml.schemas": {
+    "https://raw.githubusercontent.com/ansible/ansible-lint/main/src/ansiblelint/schemas/ansible.json#/$defs/playbook": [
+      "playbooks/*.yml"
+    ],
+    "https://raw.githubusercontent.com/ansible/ansible-lint/main/src/ansiblelint/schemas/ansible.json#/$defs/tasks": [
+      "roles/*/tasks/*.yml",
+      "roles/*/handlers/*.yml"
+    ]
+  },
+  "yaml.customTags": [
+    "!vault scalar",
+    "!unsafe scalar"
+  ],
+  "git.autofetch": true,
+  "git.confirmSync": false,
+  "editor.rulers": [120],
+  "files.trimTrailingWhitespace": true,
+  "files.insertFinalNewline": true,
+  "files.associations": {
+    "*.j2": "jinja",
+    "hosts": "ini",
+    "hosts.yml": "yaml",
+    "*.rsp": "ini"
+  }
+}
